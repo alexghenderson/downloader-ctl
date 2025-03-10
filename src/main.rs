@@ -2,7 +2,6 @@ use std::{
     env,
     error::Error,
     io,
-    panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -15,6 +14,7 @@ use crossterm::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
@@ -23,7 +23,6 @@ use tui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame, Terminal,
 };
-use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -85,7 +84,7 @@ enum InputMode {
 }
 
 impl App {
-    async fn new(downloader_url: String) -> Self {
+    fn new(downloader_url: String) -> Self {
         App {
             downloader_url,
             downloads: Vec::new(),
@@ -127,20 +126,8 @@ impl App {
         }
     }
 
-    async fn stop_download(&self, model_name: &str) -> Result<(), Box<dyn Error>> {
-        self.control_download(model_name, "stop").await
-    }
-
-    async fn restart_download(&self, model_name: &str) -> Result<(), Box<dyn Error>> {
-        self.control_download(model_name, "restart").await
-    }
-
-    async fn pause_download(&self, model_name: &str) -> Result<(), Box<dyn Error>> {
-        self.control_download(model_name, "pause").await
-    }
-
     async fn control_download(&self, model_name: &str, action: &str) -> Result<(), Box<dyn Error>> {
-        let control_url = format!("{}/{}/{}", self.downloader_url, model_name, action);
+        let control_url = format!("{}/downloads/{}/{}", self.downloader_url, model_name, action);
         let response = self.client.post(&control_url).send().await?;
 
         if response.status().is_success() {
@@ -155,11 +142,9 @@ impl App {
             self.selected_download = None;
             return;
         }
-
-        self.selected_download = match self.selected_download {
-            None => Some(0),
-            Some(i) => Some(std::cmp::min(i + 1, self.downloads.len() - 1)),
-        };
+        self.selected_download = Some(self.selected_download.map_or(0, |i| {
+            (i + 1).min(self.downloads.len() - 1)
+        }));
     }
 
     fn select_previous(&mut self) {
@@ -167,59 +152,45 @@ impl App {
             self.selected_download = None;
             return;
         }
-
-        self.selected_download = match self.selected_download {
-            None => Some(0),
-            Some(i) => Some(std::cmp::max(i as i32 - 1, 0) as usize),
-        };
+        self.selected_download = Some(self.selected_download.map_or(0, |i| i.saturating_sub(1)));
     }
 
-    fn selected_model_name(&self) -> Option<String> {
-        self.selected_download.map(|i| self.downloads[i].modelName.clone())
+    fn selected_model_name(&self) -> Option<&str> {
+        self.selected_download.map(|i| self.downloads[i].modelName.as_str())
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let downloader_url = match env::args().nth(1) {
-        Some(url) => url,
-        None => env::var("DOWNLOADER_URL").map_err(|_| "DOWNLOADER_URL not set")?,
-    };
+    let downloader_url = env::args()
+        .nth(1)
+        .unwrap_or_else(|| env::var("DOWNLOADER_URL").unwrap_or_else(|_| "http://localhost:8080".to_string()));
 
-    // setup terminal
+    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let app = Arc::new(Mutex::new(App::new(downloader_url).await));
+    let app = Arc::new(Mutex::new(App::new(downloader_url)));
 
-    // Clone the Arc for the background task
-    let app_background = app.clone();
+    // Background refresh task
+    let app_clone = app.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         loop {
             interval.tick().await;
-            let app_clone = app_background.clone();
-            let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-            match result {
-                Ok(mutex_guard) => {
-                    let app = mutex_guard.await;
-                    if let Err(e) = app.fetch_downloads().await {
-                        eprintln!("Error fetching downloads: {}", e);
-                    }
-                }
-                Err(_e) => {
-                    eprintln!("Failed to lock app due to poisoning");
-                }
+            let mut app = app_clone.lock().await; // No Result to unwrap
+            if let Err(e) = app.fetch_downloads().await {
+                eprintln!("Error fetching downloads: {}", e);
             }
         }
     });
 
     let res = run_app(&mut terminal, app).await;
 
-    // restore terminal
+    // Cleanup terminal
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -228,11 +199,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        println!("{:?}", err)
-    }
-
-    Ok(())
+    res
 }
 
 async fn run_app<B: Backend>(
@@ -240,226 +207,67 @@ async fn run_app<B: Backend>(
     app: Arc<Mutex<App>>,
 ) -> Result<(), Box<dyn Error>> {
     loop {
-        terminal.draw(|f| ui(f, app.clone()))?;
+        {
+            let app = app.lock().await;
+            terminal.draw(|f| ui(f, &app))?;
+        }
 
         if let Event::Key(key) = event::read()? {
-            let app_clone = app.clone();
-            let input_mode = {
-                let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-                match result {
-                    Ok(mutex_guard) => {
-                        let app = mutex_guard.await;
-                        app.input_mode.clone()
-                    }
-                    Err(_e) => InputMode::Normal, // Handle the error case
-                }
-            };
-
-            match input_mode {
+            let mut app = app.lock().await;
+            
+            match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('a') => {
-                        let app_clone = app.clone();
-                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-                        if let Ok(mutex_guard) = result {
-                            let mut app = mutex_guard.await;
-                            app.input_mode = InputMode::AddingDownload;
-                        }
+                        app.input_mode = InputMode::AddingDownload;
                     }
                     KeyCode::Char('s') => {
-                        let model_name = {
-                            let app = app.lock().await;
-                            match app {
-                                Ok(app) => app.selected_model_name(),
-                                Err(_) => None,
+                        if let Some(model_name) = app.selected_model_name() {
+                            let model_name = model_name.to_string();
+                            if let Err(e) = app.control_download(&model_name, "stop").await {
+                                eprintln!("Error stopping download: {}", e);
                             }
-                        };
-
-                        if let Some(model_name) = model_name {
-                            let app_clone_inner = app.clone();
-                            let model_name_clone = model_name.clone();
-                            tokio::spawn(async move {
-                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
-                                match result {
-                                    Ok(mutex_guard) => {
-                                        let app = mutex_guard.await;
-                                        if let Err(e) = app.stop_download(&model_name_clone).await {
-                                            eprintln!("Error stopping download: {}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to lock app: {:?}", e);
-                                    }
-                                }
-                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
-                                match result {
-                                    Ok(mutex_guard) => {
-                                        let mut app = mutex_guard.await;
-                                        if let Err(e) = app.fetch_downloads().await {
-                                            eprintln!("Error fetching downloads after stopping: {}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to lock app: {:?}", e);
-                                    }
-                                }
-                            });
+                            app.fetch_downloads().await?;
                         }
                     }
                     KeyCode::Char('r') => {
-                        let model_name = {
-                            let app = app.lock().await;
-                            match app {
-                                Ok(app) => app.selected_model_name(),
-                                Err(_) => None,
+                        if let Some(model_name) = app.selected_model_name() {
+                            let model_name = model_name.to_string();
+                            if let Err(e) = app.control_download(&model_name, "restart").await {
+                                eprintln!("Error restarting download: {}", e);
                             }
-                        };
-
-                        if let Some(model_name) = model_name {
-                            let app_clone_inner = app.clone();
-                            let model_name_clone = model_name.clone();
-                            tokio::spawn(async move {
-                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
-                                match result {
-                                    Ok(mutex_guard) => {
-                                        let app = mutex_guard.await;
-                                        if let Err(e) = app.restart_download(&model_name_clone).await {
-                                            eprintln!("Error restarting download: {}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to lock app: {:?}", e);
-                                    }
-                                }
-                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
-                                match result {
-                                    Ok(mutex_guard) => {
-                                        let mut app = mutex_guard.await;
-                                        if let Err(e) = app.fetch_downloads().await {
-                                            eprintln!("Error fetching downloads after restarting: {}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to lock app: {:?}", e);
-                                    }
-                                }
-                            });
+                            app.fetch_downloads().await?;
                         }
                     }
                     KeyCode::Char('p') => {
-                        let model_name = {
-                            let app = app.lock().await;
-                            match app {
-                                Ok(app) => app.selected_model_name(),
-                                Err(_) => None,
+                        if let Some(model_name) = app.selected_model_name() {
+                            let model_name = model_name.to_string();
+                            if let Err(e) = app.control_download(&model_name, "pause").await {
+                                eprintln!("Error pausing download: {}", e);
                             }
-                        };
-
-                        if let Some(model_name) = model_name {
-                            let app_clone_inner = app.clone();
-                            let model_name_clone = model_name.clone();
-                            tokio::spawn(async move {
-                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
-                                match result {
-                                    Ok(mutex_guard) => {
-                                        let app = mutex_guard.await;
-                                        if let Err(e) = app.pause_download(&model_name_clone).await {
-                                            eprintln!("Error pausing download: {}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to lock app: {:?}", e);
-                                    }
-                                }
-                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
-                                match result {
-                                    Ok(mutex_guard) => {
-                                        let mut app = mutex_guard.await;
-                                        if let Err(e) = app.fetch_downloads().await {
-                                            eprintln!("Error fetching downloads after pausing: {}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to lock app: {:?}", e);
-                                    }
-                                }
-                            });
+                            app.fetch_downloads().await?;
                         }
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let app_clone = app.clone();
-                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-                        if let Ok(mutex_guard) = result {
-                            let mut app = mutex_guard.await;
-                            app.select_next();
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let app_clone = app.clone();
-                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-                        if let Ok(mutex_guard) = result {
-                            let mut app = mutex_guard.await;
-                            app.select_previous();
-                        }
-                    }
+                    KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                    KeyCode::Up | KeyCode::Char('k') => app.select_previous(),
                     _ => {}
                 },
                 InputMode::AddingDownload => match key.code {
                     KeyCode::Enter => {
-                        let url = {
-                            let app_clone = app.clone();
-                            let mut url = String::new();
-                            let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-                            if let Ok(mutex_guard) = result {
-                                let mut app = mutex_guard.await;
-                                url = app.input_buffer.drain(..).collect();
-                                app.input_mode = InputMode::Normal;
-                            }
-                            url
-                        };
-                        let app_clone_inner = app.clone();
-                        tokio::spawn(async move {
-                            let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
-                            match result {
-                                Ok(mutex_guard) => {
-                                    let mut app = mutex_guard.await;
-                                    if let Err(e) = app.add_download(url.clone()).await {
-                                        eprintln!("Error adding download: {}", e);
-                                    }
-                                    if let Err(e) = app.fetch_downloads().await {
-                                        eprintln!("Error fetching downloads after adding: {}", e);
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("Failed to lock app: {:?}", e);
-                                }
-                            }
-                        });
-                    }
-                    KeyCode::Char(c) => {
-                        let app_clone = app.clone();
-                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-                        if let Ok(mutex_guard) = result {
-                            let mut app = mutex_guard.await;
-                            app.input_buffer.push(c);
+                        let url = app.input_buffer.clone();
+                        app.input_buffer.clear();
+                        app.input_mode = InputMode::Normal;
+                        if !url.is_empty() {
+                            app.add_download(url).await?;
                         }
                     }
+                    KeyCode::Char(c) => app.input_buffer.push(c),
                     KeyCode::Backspace => {
-                        let app_clone = app.clone();
-                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-                        if let Ok(mutex_guard) = result {
-                            let mut app = mutex_guard.await;
-                            app.input_buffer.pop();
-                        }
+                        app.input_buffer.pop();
                     }
                     KeyCode::Esc => {
-                        let app_clone = app.clone();
-                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
-                        if let Ok(mutex_guard) = result {
-                            let mut app = mutex_guard.await;
-                            app.input_mode = InputMode::Normal;
-                            app.input_buffer.clear();
-                        }
+                        app.input_mode = InputMode::Normal;
+                        app.input_buffer.clear();
                     }
                     _ => {}
                 },
@@ -468,85 +276,67 @@ async fn run_app<B: Backend>(
     }
 }
 
-fn ui<B: Backend>(f: &mut Frame<B>, app_mutex: Arc<Mutex<App>>) {
-    let result = catch_unwind(AssertUnwindSafe(app_mutex.lock()));
-    match result {
-        Ok(mutex_guard) => {
-            let app = mutex_guard.await;
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
-                .split(f.size());
+fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
+        .split(f.size());
 
-            let items: Vec<ListItem> = app
-                .downloads
-                .iter()
-                .map(|download| {
-                    let time_since_last_change = Utc::now() - download.lastStatusChange;
-                    let time_str = if time_since_last_change.num_seconds() < 60 {
-                        format!("{}s", time_since_last_change.num_seconds())
-                    } else {
-                        format!("{}m", time_since_last_change.num_minutes())
-                    };
+    let items: Vec<ListItem> = app
+        .downloads
+        .iter()
+        .map(|download| {
+            let time_since_last_change = Utc::now() - download.lastStatusChange;
+            let time_str = if time_since_last_change.num_seconds() < 60 {
+                format!("{}s", time_since_last_change.num_seconds())
+            } else {
+                format!("{}m", time_since_last_change.num_minutes())
+            };
 
-                    let style = if let Some(selected) = app.selected_download {
-                        if app.downloads[selected].modelName == download.modelName {
-                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        }
-                    } else {
-                        Style::default()
-                    };
+            let style = if let Some(selected) = app.selected_download {
+                if app.downloads[selected].modelName == download.modelName {
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                }
+            } else {
+                Style::default()
+            };
 
-                    ListItem::new(vec![
-                        Spans::from(vec![
-                            Span::styled(
-                                format!("{} ", download.modelName),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(format!("Status: {}, Last Change: {}", download.status, time_str)),
-                        ]),
-                    ])
-                    .style(style)
-                })
-                .collect();
+            ListItem::new(vec![Spans::from(vec![
+                Span::styled(
+                    format!("{} ", download.modelName),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "Status: {}, Last Change: {}",
+                    download.status, time_str
+                )),
+            ])])
+            .style(style)
+        })
+        .collect();
 
-            let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title("Downloads"));
-            f.render_widget(list, chunks[0]);
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Downloads"));
+    f.render_widget(list, chunks[0]);
 
-            let shortcuts = Paragraph::new(Text::from(Spans::from(vec![
-                Span::raw("[A]dd Download "),
-                Span::raw("[S]top Download "),
-                Span::raw("[R]estart Download "),
-                Span::raw("[P]ause Download "),
-                Span::raw("[Q]uit"),
-            ])))
-            .block(Block::default().borders(Borders::ALL).title("Shortcuts"));
+    let shortcuts = Paragraph::new(Text::from(Spans::from(vec![
+        Span::raw("[A]dd Download "),
+        Span::raw("[S]top Download "),
+        Span::raw("[R]estart Download "),
+        Span::raw("[P]ause Download "),
+        Span::raw("[Q]uit"),
+    ])))
+    .block(Block::default().borders(Borders::ALL).title("Shortcuts"));
 
-            f.render_widget(shortcuts, chunks[1]);
+    f.render_widget(shortcuts, chunks[1]);
 
-            if app.input_mode == InputMode::AddingDownload {
-                let input_rect = Rect::new(
-                    chunks[0].x + 1,
-                    chunks[0].y + 1,
-                    chunks[0].width - 2,
-                    3,
-                );
-                f.render_widget(
-                    Paragraph::new(app.input_buffer.as_ref())
-                        .block(Block::default().borders(Borders::ALL).title("Enter URL")),
-                    input_rect,
-                );
-            }
-        }
-        Err(e) => {
-            // Handle the error when locking the mutex
-            let error_message = format!("Failed to lock app: {:?}", e);
-            let paragraph = Paragraph::new(error_message)
-                .block(Block::default().title("Error").borders(Borders::ALL));
-            f.render_widget(paragraph, f.size());
-        }
+    if app.input_mode == InputMode::AddingDownload {
+        let input_rect = Rect::new(chunks[0].x + 1, chunks[0].y + 1, chunks[0].width - 2, 3);
+        f.render_widget(
+            Paragraph::new(app.input_buffer.as_ref())
+                .block(Block::default().borders(Borders::ALL).title("Enter URL")),
+            input_rect,
+        );
     }
 }
