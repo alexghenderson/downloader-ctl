@@ -177,7 +177,8 @@ impl App {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let downloader_url = match env::args().nth(1) {
         Some(url) => url,
         None => env::var("DOWNLOADER_URL").map_err(|_| "DOWNLOADER_URL not set")?,
