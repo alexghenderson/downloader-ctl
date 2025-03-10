@@ -20,7 +20,7 @@ use tui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Span, Spans, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, StatefulWidget, ListState},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
 
@@ -70,12 +70,11 @@ struct Download {
 struct App {
     downloader_url: String,
     downloads: Vec<Download>,
-    selected_download: Option<usize>,
+    list_state: ListState,
     input_mode: InputMode,
     input_buffer: String,
     client: Client,
     last_refresh: Instant,
-    scroll_offset: usize,
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -86,15 +85,17 @@ enum InputMode {
 
 impl App {
     fn new(downloader_url: String) -> Self {
+        let mut list_state = ListState::default();
+        list_state.select(None); // Initially no selection
+        
         App {
             downloader_url,
             downloads: Vec::new(),
-            selected_download: None,
+            list_state,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             client: Client::new(),
             last_refresh: Instant::now(),
-            scroll_offset: 0,
         }
     }
 
@@ -103,8 +104,18 @@ impl App {
         let response = self.client.get(&url).send().await?;
 
         if response.status().is_success() {
+            let prev_selected = self.list_state.selected();
             self.downloads = response.json().await?;
             self.last_refresh = Instant::now();
+            
+            // Preserve selection if possible
+            if !self.downloads.is_empty() {
+                if let Some(selected) = prev_selected {
+                    self.list_state.select(Some(selected.min(self.downloads.len() - 1)));
+                }
+            } else {
+                self.list_state.select(None);
+            }
             Ok(())
         } else {
             Err(format!("Failed to fetch downloads: {}", response.status()).into())
@@ -141,44 +152,46 @@ impl App {
 
     fn select_next(&mut self) {
         if self.downloads.is_empty() {
-            self.selected_download = None;
+            self.list_state.select(None);
             return;
         }
 
-        let new_selection = Some(self.selected_download.map_or(0, |i| {
-            (i + 1).min(self.downloads.len() - 1)
-        }));
-
-        self.selected_download = new_selection;
-
-        // Adjust scroll offset to keep selected item visible
-        if let Some(selected) = self.selected_download {
-            let visible_height = 10; // Assuming a visible height of 10 items
-            if selected >= self.scroll_offset + visible_height - 2 {
-                self.scroll_offset = (selected as i32 - visible_height as i32 + 2).max(0) as usize;
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i >= self.downloads.len() - 1 {
+                    i
+                } else {
+                    i + 1
+                }
             }
-        }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
     }
 
     fn select_previous(&mut self) {
         if self.downloads.is_empty() {
-            self.selected_download = None;
+            self.list_state.select(None);
             return;
         }
 
-        let new_selection = Some(self.selected_download.map_or(0, |i| i.saturating_sub(1)));
-        self.selected_download = new_selection;
-
-        // Adjust scroll offset to keep selected item visible
-        if let Some(selected) = self.selected_download {
-            if selected < self.scroll_offset + 1 && self.scroll_offset > 0 {
-                self.scroll_offset = selected.saturating_sub(1);
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    0
+                } else {
+                    i - 1
+                }
             }
-        }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
     }
 
     fn selected_model_name(&self) -> Option<&str> {
-        self.selected_download.map(|i| self.downloads[i].modelName.as_str())
+        self.list_state
+            .selected()
+            .map(|i| self.downloads[i].modelName.as_str())
     }
 }
 
@@ -186,7 +199,9 @@ impl App {
 async fn main() -> Result<(), Box<dyn Error>> {
     let downloader_url = env::args()
         .nth(1)
-        .unwrap_or_else(|| env::var("DOWNLOADER_URL").unwrap_or_else(|_| "http://localhost:8080".to_string()));
+        .unwrap_or_else(|| {
+            env::var("DOWNLOADER_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
+        });
 
     // Setup terminal
     enable_raw_mode()?;
@@ -203,7 +218,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         loop {
             interval.tick().await;
-            let mut app = app_clone.lock().await; // No Result to unwrap
+            let mut app = app_clone.lock().await;
             if let Err(e) = app.fetch_downloads().await {
                 eprintln!("Error fetching downloads: {}", e);
             }
@@ -230,13 +245,13 @@ async fn run_app<B: Backend>(
 ) -> Result<(), Box<dyn Error>> {
     loop {
         {
-            let app = app.lock().await;
-            terminal.draw(|f| ui(f, &app))?;
+            let mut app = app.lock().await;
+            terminal.draw(|f| ui(f, &mut app))?;
         }
 
         if let Event::Key(key) = event::read()? {
             let mut app = app.lock().await;
-            
+
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => return Ok(()),
@@ -298,20 +313,14 @@ async fn run_app<B: Backend>(
     }
 }
 
-fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
+fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
         .split(f.size());
 
-    let visible_downloads: Vec<Download> = app.downloads
-        .iter()
-        .skip(app.scroll_offset)
-        .take(10) // Number of items visible in the list
-        .cloned()
-        .collect();
-
-    let items: Vec<ListItem> = visible_downloads
+    let items: Vec<ListItem> = app
+        .downloads
         .iter()
         .map(|download| {
             let time_since_last_change = Utc::now() - download.lastStatusChange;
@@ -319,16 +328,6 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 format!("{}s", time_since_last_change.num_seconds())
             } else {
                 format!("{}m", time_since_last_change.num_minutes())
-            };
-
-            let style = if let Some(selected) = app.selected_download {
-                if app.downloads[selected].modelName == download.modelName {
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                }
-            } else {
-                Style::default()
             };
 
             ListItem::new(vec![Spans::from(vec![
@@ -341,12 +340,18 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                     download.status, time_str
                 )),
             ])])
-            .style(style)
         })
         .collect();
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Downloads"));
-    f.render_widget(list, chunks[0]);
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("Downloads"))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    f.render_stateful_widget(list, chunks[0], &mut app.list_state);
 
     let shortcuts = Paragraph::new(Text::from(Spans::from(vec![
         Span::raw("[A]dd Download "),
