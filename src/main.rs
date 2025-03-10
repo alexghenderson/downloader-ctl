@@ -241,7 +241,7 @@ async fn run_app<B: Backend>(
 
         if let Event::Key(key) = event::read()? {
             let app_clone = app.clone();
-            match {
+            let input_mode = {
                 let app = app_clone.lock().await;
                 match app {
                     Ok(ref app) => app.input_mode.clone(),
@@ -250,7 +250,9 @@ async fn run_app<B: Backend>(
                         InputMode::Normal
                     }
                 }
-            } {
+            };
+
+            match input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('a') => {
@@ -264,23 +266,27 @@ async fn run_app<B: Backend>(
                         } {
                             let app_clone_inner = app_clone.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = {
-                                    let app = app_clone_inner.lock().await;
-                                    match app {
-                                        Ok(app) => app.stop_download(&model_name).await,
-                                        Err(err) => Err(format!("Failed to lock app: {}", err).into()),
+                                let result = app_clone_inner.lock().await;
+                                match result {
+                                    Ok(app) => {
+                                        if let Err(e) = app.stop_download(&model_name).await {
+                                            eprintln!("Error stopping download: {}", e);
+                                        }
                                     }
-                                } {
-                                    eprintln!("Error stopping download: {}", e);
+                                    Err(err) => {
+                                        eprintln!("Failed to lock app: {}", err);
+                                    }
                                 }
-                                if let Err(e) = {
-                                    let app = app_clone_inner.lock().await;
-                                    match app {
-                                        Ok(app) => app.fetch_downloads().await,
-                                        Err(err) => Err(format!("Failed to lock app: {}", err).into()),
+                                let result = app_clone_inner.lock().await;
+                                match result {
+                                    Ok(mut app) => {
+                                        if let Err(e) = app.fetch_downloads().await {
+                                            eprintln!("Error fetching downloads after stopping: {}", e);
+                                        }
                                     }
-                                } {
-                                    eprintln!("Error fetching downloads after stopping: {}", e);
+                                    Err(err) => {
+                                        eprintln!("Failed to lock app: {}", err);
+                                    }
                                 }
                             });
                         }
@@ -292,23 +298,27 @@ async fn run_app<B: Backend>(
                         } {
                             let app_clone_inner = app_clone.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = {
-                                    let app = app_clone_inner.lock().await;
-                                    match app {
-                                        Ok(app) => app.restart_download(&model_name).await,
-                                        Err(err) => Err(format!("Failed to lock app: {}", err).into()),
+                                let result = app_clone_inner.lock().await;
+                                match result {
+                                    Ok(app) => {
+                                        if let Err(e) = app.restart_download(&model_name).await {
+                                            eprintln!("Error restarting download: {}", e);
+                                        }
                                     }
-                                } {
-                                    eprintln!("Error restarting download: {}", e);
+                                    Err(err) => {
+                                        eprintln!("Failed to lock app: {}", err);
+                                    }
                                 }
-                                if let Err(e) = {
-                                    let app = app_clone_inner.lock().await;
-                                    match app {
-                                        Ok(app) => app.fetch_downloads().await,
-                                        Err(err) => Err(format!("Failed to lock app: {}", err).into()),
+                                let result = app_clone_inner.lock().await;
+                                match result {
+                                    Ok(mut app) => {
+                                        if let Err(e) = app.fetch_downloads().await {
+                                            eprintln!("Error fetching downloads after restarting: {}", e);
+                                        }
                                     }
-                                } {
-                                    eprintln!("Error fetching downloads after restarting: {}", e);
+                                    Err(err) => {
+                                        eprintln!("Failed to lock app: {}", err);
+                                    }
                                 }
                             });
                         }
@@ -320,23 +330,27 @@ async fn run_app<B: Backend>(
                         } {
                             let app_clone_inner = app_clone.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = {
-                                    let app = app_clone_inner.lock().await;
-                                    match app {
-                                        Ok(app) => app.pause_download(&model_name).await,
-                                        Err(err) => Err(format!("Failed to lock app: {}", err).into()),
+                                let result = app_clone_inner.lock().await;
+                                match result {
+                                    Ok(app) => {
+                                        if let Err(e) = app.pause_download(&model_name).await {
+                                            eprintln!("Error pausing download: {}", e);
+                                        }
                                     }
-                                } {
-                                    eprintln!("Error pausing download: {}", e);
+                                    Err(err) => {
+                                        eprintln!("Failed to lock app: {}", err);
+                                    }
                                 }
-                                if let Err(e) = {
-                                    let app = app_clone_inner.lock().await;
-                                    match app {
-                                        Ok(app) => app.fetch_downloads().await,
-                                        Err(err) => Err(format!("Failed to lock app: {}", err).into()),
+                                let result = app_clone_inner.lock().await;
+                                match result {
+                                    Ok(mut app) => {
+                                        if let Err(e) = app.fetch_downloads().await {
+                                            eprintln!("Error fetching downloads after pausing: {}", e);
+                                        }
                                     }
-                                } {
-                                    eprintln!("Error fetching downloads after pausing: {}", e);
+                                    Err(err) => {
+                                        eprintln!("Failed to lock app: {}", err);
+                                    }
                                 }
                             });
                         }
@@ -359,23 +373,27 @@ async fn run_app<B: Backend>(
                         };
                         let app_clone_inner = app_clone.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = {
-                                let app = app_clone_inner.lock().await;
-                                match app {
-                                    Ok(app) => app.add_download(url).await,
-                                    Err(err) => Err(format!("Failed to lock app: {}", err).into()),
+                            let result = app_clone_inner.lock().await;
+                            match result {
+                                Ok(mut app) => {
+                                    if let Err(e) = app.add_download(url).await {
+                                        eprintln!("Error adding download: {}", e);
+                                    }
                                 }
-                            } {
-                                eprintln!("Error adding download: {}", e);
+                                Err(err) => {
+                                    eprintln!("Failed to lock app: {}", err);
+                                }
                             }
-                            if let Err(e) = {
-                                let app = app_clone_inner.lock().await;
-                                match app {
-                                    Ok(app) => app.fetch_downloads().await,
-                                    Err(err) => Err(format!("Failed to lock app: {}", err).into()),
+                            let result = app_clone_inner.lock().await;
+                            match result {
+                                Ok(mut app) => {
+                                    if let Err(e) = app.fetch_downloads().await {
+                                        eprintln!("Error fetching downloads after adding: {}", e);
+                                    }
                                 }
-                            } {
-                                eprintln!("Error fetching downloads after adding: {}", e);
+                                Err(err) => {
+                                    eprintln!("Failed to lock app: {}", err);
+                                }
                             }
                         });
                         let mut app = app_clone.lock().await?;
