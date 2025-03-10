@@ -2,11 +2,12 @@ use std::{
     env,
     error::Error,
     io,
-    time::{Duration, Instant},
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc, Duration as ChronoDuration};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -201,14 +202,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             interval.tick().await;
             let app_clone = app_background.clone();
-            match app_clone.lock().await {
-                Ok(mut app) => {
+            let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+            match result {
+                Ok(mutex_guard) => {
+                    let app = mutex_guard.await;
                     if let Err(e) = app.fetch_downloads().await {
                         eprintln!("Error fetching downloads: {}", e);
                     }
                 }
-                Err(e) => {
-                    eprintln!("Failed to lock app: {}", e);
+                Err(_e) => {
+                    eprintln!("Failed to lock app due to poisoning");
                 }
             }
         }
@@ -242,10 +245,13 @@ async fn run_app<B: Backend>(
         if let Event::Key(key) = event::read()? {
             let app_clone = app.clone();
             let input_mode = {
-                let app = app_clone.lock().await;
-                match app {
-                    Ok(app) => app.input_mode.clone(),
-                    Err(_) => InputMode::Normal, // Handle the error case
+                let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+                match result {
+                    Ok(mutex_guard) => {
+                        let app = mutex_guard.await;
+                        app.input_mode.clone()
+                    }
+                    Err(_e) => InputMode::Normal, // Handle the error case
                 }
             };
 
@@ -254,7 +260,9 @@ async fn run_app<B: Backend>(
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('a') => {
                         let app_clone = app.clone();
-                        if let Ok(mut app) = app_clone.lock().await {
+                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+                        if let Ok(mutex_guard) = result {
+                            let mut app = mutex_guard.await;
                             app.input_mode = InputMode::AddingDownload;
                         }
                     }
@@ -269,34 +277,37 @@ async fn run_app<B: Backend>(
 
                         if let Some(model_name) = model_name {
                             let app_clone_inner = app.clone();
+                            let model_name_clone = model_name.clone();
                             tokio::spawn(async move {
-                                let app = app_clone_inner.lock().await;
-                                match app {
-                                    Ok(app) => {
-                                        if let Err(e) = app.stop_download(&model_name).await {
+                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
+                                match result {
+                                    Ok(mutex_guard) => {
+                                        let app = mutex_guard.await;
+                                        if let Err(e) = app.stop_download(&model_name_clone).await {
                                             eprintln!("Error stopping download: {}", e);
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("Failed to lock app: {}", e);
+                                        eprintln!("Failed to lock app: {:?}", e);
                                     }
                                 }
-                                let app = app_clone_inner.lock().await;
-                                match app {
-                                    Ok(mut app) => {
+                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
+                                match result {
+                                    Ok(mutex_guard) => {
+                                        let mut app = mutex_guard.await;
                                         if let Err(e) = app.fetch_downloads().await {
                                             eprintln!("Error fetching downloads after stopping: {}", e);
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("Failed to lock app: {}", e);
+                                        eprintln!("Failed to lock app: {:?}", e);
                                     }
                                 }
                             });
                         }
                     }
                     KeyCode::Char('r') => {
-                         let model_name = {
+                        let model_name = {
                             let app = app.lock().await;
                             match app {
                                 Ok(app) => app.selected_model_name(),
@@ -306,27 +317,30 @@ async fn run_app<B: Backend>(
 
                         if let Some(model_name) = model_name {
                             let app_clone_inner = app.clone();
+                            let model_name_clone = model_name.clone();
                             tokio::spawn(async move {
-                                let app = app_clone_inner.lock().await;
-                                match app {
-                                    Ok(app) => {
-                                        if let Err(e) = app.restart_download(&model_name).await {
+                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
+                                match result {
+                                    Ok(mutex_guard) => {
+                                        let app = mutex_guard.await;
+                                        if let Err(e) = app.restart_download(&model_name_clone).await {
                                             eprintln!("Error restarting download: {}", e);
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("Failed to lock app: {}", e);
+                                        eprintln!("Failed to lock app: {:?}", e);
                                     }
                                 }
-                                let app = app_clone_inner.lock().await;
-                                match app {
-                                    Ok(mut app) => {
+                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
+                                match result {
+                                    Ok(mutex_guard) => {
+                                        let mut app = mutex_guard.await;
                                         if let Err(e) = app.fetch_downloads().await {
                                             eprintln!("Error fetching downloads after restarting: {}", e);
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("Failed to lock app: {}", e);
+                                        eprintln!("Failed to lock app: {:?}", e);
                                     }
                                 }
                             });
@@ -343,27 +357,30 @@ async fn run_app<B: Backend>(
 
                         if let Some(model_name) = model_name {
                             let app_clone_inner = app.clone();
+                            let model_name_clone = model_name.clone();
                             tokio::spawn(async move {
-                                let app = app_clone_inner.lock().await;
-                                match app {
-                                    Ok(app) => {
-                                        if let Err(e) = app.pause_download(&model_name).await {
+                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
+                                match result {
+                                    Ok(mutex_guard) => {
+                                        let app = mutex_guard.await;
+                                        if let Err(e) = app.pause_download(&model_name_clone).await {
                                             eprintln!("Error pausing download: {}", e);
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("Failed to lock app: {}", e);
+                                        eprintln!("Failed to lock app: {:?}", e);
                                     }
                                 }
-                                let app = app_clone_inner.lock().await;
-                                match app {
-                                    Ok(mut app) => {
+                                let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
+                                match result {
+                                    Ok(mutex_guard) => {
+                                        let mut app = mutex_guard.await;
                                         if let Err(e) = app.fetch_downloads().await {
                                             eprintln!("Error fetching downloads after pausing: {}", e);
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("Failed to lock app: {}", e);
+                                        eprintln!("Failed to lock app: {:?}", e);
                                     }
                                 }
                             });
@@ -371,13 +388,17 @@ async fn run_app<B: Backend>(
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
                         let app_clone = app.clone();
-                        if let Ok(mut app) = app_clone.lock().await {
+                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+                        if let Ok(mutex_guard) = result {
+                            let mut app = mutex_guard.await;
                             app.select_next();
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         let app_clone = app.clone();
-                        if let Ok(mut app) = app_clone.lock().await {
+                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+                        if let Ok(mutex_guard) = result {
+                            let mut app = mutex_guard.await;
                             app.select_previous();
                         }
                     }
@@ -388,7 +409,9 @@ async fn run_app<B: Backend>(
                         let url = {
                             let app_clone = app.clone();
                             let mut url = String::new();
-                            if let Ok(mut app) = app_clone.lock().await {
+                            let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+                            if let Ok(mutex_guard) = result {
+                                let mut app = mutex_guard.await;
                                 url = app.input_buffer.drain(..).collect();
                                 app.input_mode = InputMode::Normal;
                             }
@@ -396,9 +419,10 @@ async fn run_app<B: Backend>(
                         };
                         let app_clone_inner = app.clone();
                         tokio::spawn(async move {
-                            let app = app_clone_inner.lock().await;
-                            match app {
-                                Ok(mut app) => {
+                            let result = catch_unwind(AssertUnwindSafe(app_clone_inner.lock()));
+                            match result {
+                                Ok(mutex_guard) => {
+                                    let mut app = mutex_guard.await;
                                     if let Err(e) = app.add_download(url.clone()).await {
                                         eprintln!("Error adding download: {}", e);
                                     }
@@ -407,26 +431,32 @@ async fn run_app<B: Backend>(
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to lock app: {}", e);
+                                    eprintln!("Failed to lock app: {:?}", e);
                                 }
                             }
                         });
                     }
                     KeyCode::Char(c) => {
                         let app_clone = app.clone();
-                        if let Ok(mut app) = app_clone.lock().await {
+                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+                        if let Ok(mutex_guard) = result {
+                            let mut app = mutex_guard.await;
                             app.input_buffer.push(c);
                         }
                     }
                     KeyCode::Backspace => {
                         let app_clone = app.clone();
-                        if let Ok(mut app) = app_clone.lock().await {
+                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+                        if let Ok(mutex_guard) = result {
+                            let mut app = mutex_guard.await;
                             app.input_buffer.pop();
                         }
                     }
                     KeyCode::Esc => {
                         let app_clone = app.clone();
-                        if let Ok(mut app) = app_clone.lock().await {
+                        let result = catch_unwind(AssertUnwindSafe(app_clone.lock()));
+                        if let Ok(mutex_guard) = result {
+                            let mut app = mutex_guard.await;
                             app.input_mode = InputMode::Normal;
                             app.input_buffer.clear();
                         }
@@ -439,8 +469,10 @@ async fn run_app<B: Backend>(
 }
 
 fn ui<B: Backend>(f: &mut Frame<B>, app_mutex: Arc<Mutex<App>>) {
-    match app_mutex.lock().await {
-        Ok(app) => {
+    let result = catch_unwind(AssertUnwindSafe(app_mutex.lock()));
+    match result {
+        Ok(mutex_guard) => {
+            let app = mutex_guard.await;
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
@@ -511,7 +543,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app_mutex: Arc<Mutex<App>>) {
         }
         Err(e) => {
             // Handle the error when locking the mutex
-            let error_message = format!("Failed to lock app: {}", e);
+            let error_message = format!("Failed to lock app: {:?}", e);
             let paragraph = Paragraph::new(error_message)
                 .block(Block::default().title("Error").borders(Borders::ALL));
             f.render_widget(paragraph, f.size());
