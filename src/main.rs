@@ -5,15 +5,14 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Deserializer};
 use tokio::sync::Mutex;
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -24,8 +23,34 @@ use tui::{
     Frame, Terminal,
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+// Custom deserialization function for DownloadStatus
+fn deserialize_status<'de, D>(deserializer: D) -> Result<DownloadStatus, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = String::deserialize(deserializer)?;
+    match s.to_lowercase().as_str() {
+        "downloading" => Ok(DownloadStatus::Downloading),
+        "initializing" => Ok(DownloadStatus::Initializing),
+        "retrying" => Ok(DownloadStatus::Retrying { message: None }),
+        "retrying: " => Ok(DownloadStatus::Retrying { message: None }), // Handle cases with no message
+        s if s.starts_with("retrying: ") => Ok(DownloadStatus::Retrying {
+            message: Some(s[10..].to_string()), // Extract message after "retrying: "
+        }),
+        "offline" => Ok(DownloadStatus::Offline),
+        "paused" => Ok(DownloadStatus::Paused),
+        "paused for exclusive show" => Ok(DownloadStatus::PausedForExclusiveShow),
+        "paused for ticket show" => Ok(DownloadStatus::PausedForTicketShow),
+        "error" => Ok(DownloadStatus::Error { message: None }),
+        s if s.starts_with("error: ") => Ok(DownloadStatus::Error {
+            message: Some(s[7..].to_string()), // Extract message after "error: "
+        }),
+        "completed" => Ok(DownloadStatus::Completed),
+        _ => Err(serde::de::Error::custom(format!("Unknown status: {}", s))),
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 enum DownloadStatus {
     Downloading,
     Initializing,
@@ -36,6 +61,16 @@ enum DownloadStatus {
     PausedForTicketShow,
     Error { message: Option<String> },
     Completed,
+}
+
+// Implement Deserialize manually using the custom function
+impl<'de> Deserialize<'de> for DownloadStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_status(deserializer)
+    }
 }
 
 impl std::fmt::Display for DownloadStatus {
@@ -119,14 +154,13 @@ impl App {
                     (DownloadStatus::Offline, DownloadStatus::Offline) => std::cmp::Ordering::Equal,
                     (DownloadStatus::Offline, _) => std::cmp::Ordering::Greater,
                     (_, DownloadStatus::Offline) => std::cmp::Ordering::Less,
-                    _ => std::cmp::Ordering::Equal, // Preserve original order for non-offline items
+                    _ => std::cmp::Ordering::Equal,
                 }
             });
             
             self.downloads = downloads;
             self.last_refresh = Instant::now();
             
-            // Preserve selection or select first item if list isn't empty
             if !self.downloads.is_empty() {
                 let selected = prev_selected.unwrap_or(0).min(self.downloads.len() - 1);
                 self.list_state.select(Some(selected));
@@ -228,7 +262,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    // Initial fetch to populate the list
     {
         let mut app = app.lock().await;
         app.fetch_downloads().await?;
