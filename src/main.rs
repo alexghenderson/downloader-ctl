@@ -8,7 +8,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -199,6 +199,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         loop {
             interval.tick().await;
+            let app_clone = app_clone.clone();
             let mut app = app_clone.lock().unwrap();
             if let Err(e) = app.fetch_downloads().await {
                 eprintln!("Error fetching downloads: {}", e);
@@ -244,11 +245,12 @@ fn run_app<B: Backend>(
                             let model_name = model_name.clone();
                             let app_clone = app.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = app_clone.stop_download(&model_name).await {
+                                let app_clone = app_clone.clone();
+                                if let Err(e) = app_clone.lock().unwrap().stop_download(&model_name).await {
                                     eprintln!("Error stopping download: {}", e);
                                 }
-                                let mut app = app_clone.lock().unwrap();
-                                app.fetch_downloads().await.unwrap();
+                                let app_clone = app_clone.clone();
+                                app_clone.lock().unwrap().fetch_downloads().await.unwrap();
                             });
                         }
                     }
@@ -257,11 +259,12 @@ fn run_app<B: Backend>(
                             let model_name = model_name.clone();
                             let app_clone = app.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = app_clone.restart_download(&model_name).await {
+                                let app_clone = app_clone.clone();
+                                if let Err(e) = app_clone.lock().unwrap().restart_download(&model_name).await {
                                     eprintln!("Error restarting download: {}", e);
                                 }
-                                let mut app = app_clone.lock().unwrap();
-                                app.fetch_downloads().await.unwrap();
+                                let app_clone = app_clone.clone();
+                                app_clone.lock().unwrap().fetch_downloads().await.unwrap();
                             });
                         }
                     }
@@ -270,11 +273,12 @@ fn run_app<B: Backend>(
                             let model_name = model_name.clone();
                             let app_clone = app.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = app_clone.pause_download(&model_name).await {
+                                let app_clone = app_clone.clone();
+                                if let Err(e) = app_clone.lock().unwrap().pause_download(&model_name).await {
                                     eprintln!("Error pausing download: {}", e);
                                 }
-                                let mut app = app_clone.lock().unwrap();
-                                app.fetch_downloads().await.unwrap();
+                                let app_clone = app_clone.clone();
+                                app_clone.lock().unwrap().fetch_downloads().await.unwrap();
                             });
                         }
                     }
@@ -287,11 +291,12 @@ fn run_app<B: Backend>(
                         let url = app.input_buffer.drain(..).collect();
                         let app_clone = app.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = app_clone.add_download(url).await {
+                            let app_clone = app_clone.clone();
+                            if let Err(e) = app_clone.lock().unwrap().add_download(url).await {
                                 eprintln!("Error adding download: {}", e);
                             }
-                            let mut app = app_clone.lock().unwrap();
-                            app.fetch_downloads().await.unwrap();
+                            let app_clone = app_clone.clone();
+                            app_clone.lock().unwrap().fetch_downloads().await.unwrap();
                         });
                         app.input_mode = InputMode::Normal;
                     }
