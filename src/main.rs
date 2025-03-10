@@ -19,7 +19,7 @@ use tui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Span, Spans, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
 
@@ -33,9 +33,9 @@ where
         "downloading" => Ok(DownloadStatus::Downloading),
         "initializing" => Ok(DownloadStatus::Initializing),
         "retrying" => Ok(DownloadStatus::Retrying { message: None }),
-        "retrying: " => Ok(DownloadStatus::Retrying { message: None }), // Handle cases with no message
+        "retrying: " => Ok(DownloadStatus::Retrying { message: None }),
         s if s.starts_with("retrying: ") => Ok(DownloadStatus::Retrying {
-            message: Some(s[10..].to_string()), // Extract message after "retrying: "
+            message: Some(s[10..].to_string()),
         }),
         "offline" => Ok(DownloadStatus::Offline),
         "paused" => Ok(DownloadStatus::Paused),
@@ -43,7 +43,7 @@ where
         "paused for ticket show" => Ok(DownloadStatus::PausedForTicketShow),
         "error" => Ok(DownloadStatus::Error { message: None }),
         s if s.starts_with("error: ") => Ok(DownloadStatus::Error {
-            message: Some(s[7..].to_string()), // Extract message after "error: "
+            message: Some(s[7..].to_string()),
         }),
         "completed" => Ok(DownloadStatus::Completed),
         _ => Err(serde::de::Error::custom(format!("Unknown status: {}", s))),
@@ -63,7 +63,6 @@ enum DownloadStatus {
     Completed,
 }
 
-// Implement Deserialize manually using the custom function
 impl<'de> Deserialize<'de> for DownloadStatus {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -148,7 +147,6 @@ impl App {
             let prev_selected = self.list_state.selected();
             let mut downloads: Vec<Download> = response.json().await?;
             
-            // Sort downloads: Offline items go to the bottom
             downloads.sort_by(|a, b| {
                 match (&a.status, &b.status) {
                     (DownloadStatus::Offline, DownloadStatus::Offline) => std::cmp::Ordering::Equal,
@@ -410,10 +408,17 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
 
     if app.input_mode == InputMode::AddingDownload {
         let input_rect = Rect::new(chunks[0].x + 1, chunks[0].y + 1, chunks[0].width - 2, 3);
-        f.render_widget(
-            Paragraph::new(app.input_buffer.as_ref())
-                .block(Block::default().borders(Borders::ALL).title("Enter URL")),
-            input_rect,
-        );
+        
+        // Clear the area to remove underlying content
+        f.render_widget(Clear, input_rect);
+
+        // Render the input paragraph with a solid background
+        let input = Paragraph::new(app.input_buffer.as_ref())
+            // .style(Style::default().fg(Color::White).bg(Color::Black))
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title("Enter URL")
+                .border_style(Style::default().fg(Color::White)));
+        f.render_widget(input, input_rect);
     }
 }
