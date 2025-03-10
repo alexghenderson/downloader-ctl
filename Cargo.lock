@@ -172,7 +172,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "downloader-tui"
+name = "downloaderctl"
 version = "0.1.0"
 dependencies = [
  "chrono",
