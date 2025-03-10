@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -92,7 +92,7 @@ enum InputMode {
 impl App {
     fn new(downloader_url: String) -> Self {
         let mut list_state = ListState::default();
-        list_state.select(Some(0)); // Start with first item selected
+        list_state.select(Some(0));
         
         App {
             downloader_url,
@@ -111,10 +111,22 @@ impl App {
 
         if response.status().is_success() {
             let prev_selected = self.list_state.selected();
-            self.downloads = response.json().await?;
+            let mut downloads: Vec<Download> = response.json().await?;
+            
+            // Sort downloads: Offline items go to the bottom
+            downloads.sort_by(|a, b| {
+                match (&a.status, &b.status) {
+                    (DownloadStatus::Offline, DownloadStatus::Offline) => std::cmp::Ordering::Equal,
+                    (DownloadStatus::Offline, _) => std::cmp::Ordering::Greater,
+                    (_, DownloadStatus::Offline) => std::cmp::Ordering::Less,
+                    _ => std::cmp::Ordering::Equal, // Preserve original order for non-offline items
+                }
+            });
+            
+            self.downloads = downloads;
             self.last_refresh = Instant::now();
             
-            // Ensure we have a selection if there are items
+            // Preserve selection or select first item if list isn't empty
             if !self.downloads.is_empty() {
                 let selected = prev_selected.unwrap_or(0).min(self.downloads.len() - 1);
                 self.list_state.select(Some(selected));
