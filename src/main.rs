@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -25,18 +25,16 @@ use tui::{
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(untagged)]
+#[serde(rename_all = "camelCase")]
 enum DownloadStatus {
     Downloading,
     Initializing,
-    Retrying,
-    RetryingWithMessage(String),
+    Retrying { message: Option<String> },
     Offline,
     Paused,
     PausedForExclusiveShow,
     PausedForTicketShow,
-    Error,
-    ErrorWithMessage(String),
+    Error { message: Option<String> },
     Completed,
 }
 
@@ -45,14 +43,18 @@ impl std::fmt::Display for DownloadStatus {
         match self {
             DownloadStatus::Downloading => write!(f, "Downloading"),
             DownloadStatus::Initializing => write!(f, "Initializing"),
-            DownloadStatus::Retrying => write!(f, "Retrying"),
-            DownloadStatus::RetryingWithMessage(msg) => write!(f, "Retrying: {}", msg),
+            DownloadStatus::Retrying { message } => match message {
+                Some(msg) => write!(f, "Retrying: {}", msg),
+                None => write!(f, "Retrying"),
+            },
             DownloadStatus::Offline => write!(f, "Offline"),
             DownloadStatus::Paused => write!(f, "Paused"),
             DownloadStatus::PausedForExclusiveShow => write!(f, "Paused for Exclusive Show"),
             DownloadStatus::PausedForTicketShow => write!(f, "Paused for Ticket Show"),
-            DownloadStatus::Error => write!(f, "Error"),
-            DownloadStatus::ErrorWithMessage(msg) => write!(f, "Error: {}", msg),
+            DownloadStatus::Error { message } => match message {
+                Some(msg) => write!(f, "Error: {}", msg),
+                None => write!(f, "Error"),
+            },
             DownloadStatus::Completed => write!(f, "Completed"),
         }
     }
@@ -60,11 +62,15 @@ impl std::fmt::Display for DownloadStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Download {
-    modelName: String,
+    #[serde(rename = "modelName")]
+    model_name: String,
     status: DownloadStatus,
-    startTime: DateTime<Utc>,
-    lastStatusChange: DateTime<Utc>,
-    retryCount: u32,
+    #[serde(rename = "startTime")]
+    start_time: DateTime<Utc>,
+    #[serde(rename = "lastStatusChange")]
+    last_status_change: DateTime<Utc>,
+    #[serde(rename = "retryCount")]
+    retry_count: u32,
 }
 
 struct App {
@@ -86,7 +92,7 @@ enum InputMode {
 impl App {
     fn new(downloader_url: String) -> Self {
         let mut list_state = ListState::default();
-        list_state.select(None); // Initially no selection
+        list_state.select(Some(0)); // Start with first item selected
         
         App {
             downloader_url,
@@ -108,11 +114,10 @@ impl App {
             self.downloads = response.json().await?;
             self.last_refresh = Instant::now();
             
-            // Preserve selection if possible
+            // Ensure we have a selection if there are items
             if !self.downloads.is_empty() {
-                if let Some(selected) = prev_selected {
-                    self.list_state.select(Some(selected.min(self.downloads.len() - 1)));
-                }
+                let selected = prev_selected.unwrap_or(0).min(self.downloads.len() - 1);
+                self.list_state.select(Some(selected));
             } else {
                 self.list_state.select(None);
             }
@@ -157,13 +162,7 @@ impl App {
         }
 
         let i = match self.list_state.selected() {
-            Some(i) => {
-                if i >= self.downloads.len() - 1 {
-                    i
-                } else {
-                    i + 1
-                }
-            }
+            Some(i) => (i + 1).min(self.downloads.len() - 1),
             None => 0,
         };
         self.list_state.select(Some(i));
@@ -176,13 +175,7 @@ impl App {
         }
 
         let i = match self.list_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    0
-                } else {
-                    i - 1
-                }
-            }
+            Some(i) => i.saturating_sub(1),
             None => 0,
         };
         self.list_state.select(Some(i));
@@ -191,7 +184,7 @@ impl App {
     fn selected_model_name(&self) -> Option<&str> {
         self.list_state
             .selected()
-            .map(|i| self.downloads[i].modelName.as_str())
+            .map(|i| self.downloads[i].model_name.as_str())
     }
 }
 
@@ -203,7 +196,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             env::var("DOWNLOADER_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
         });
 
-    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -212,7 +204,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let app = Arc::new(Mutex::new(App::new(downloader_url)));
 
-    // Background refresh task
     let app_clone = app.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
@@ -225,9 +216,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    // Initial fetch to populate the list
+    {
+        let mut app = app.lock().await;
+        app.fetch_downloads().await?;
+    }
+
     let res = run_app(&mut terminal, app).await;
 
-    // Cleanup terminal
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -319,29 +315,32 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
         .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
         .split(f.size());
 
-    let items: Vec<ListItem> = app
-        .downloads
-        .iter()
-        .map(|download| {
-            let time_since_last_change = Utc::now() - download.lastStatusChange;
-            let time_str = if time_since_last_change.num_seconds() < 60 {
-                format!("{}s", time_since_last_change.num_seconds())
-            } else {
-                format!("{}m", time_since_last_change.num_minutes())
-            };
+    let items: Vec<ListItem> = if app.downloads.is_empty() {
+        vec![ListItem::new("No downloads available")]
+    } else {
+        app.downloads
+            .iter()
+            .map(|download| {
+                let time_since_last_change = Utc::now() - download.last_status_change;
+                let time_str = if time_since_last_change.num_seconds() < 60 {
+                    format!("{}s", time_since_last_change.num_seconds())
+                } else {
+                    format!("{}m", time_since_last_change.num_minutes())
+                };
 
-            ListItem::new(vec![Spans::from(vec![
-                Span::styled(
-                    format!("{} ", download.modelName),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!(
-                    "Status: {}, Last Change: {}",
-                    download.status, time_str
-                )),
-            ])])
-        })
-        .collect();
+                ListItem::new(vec![Spans::from(vec![
+                    Span::styled(
+                        format!("{} ", download.model_name),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(
+                        "Status: {}, Last Change: {}",
+                        download.status, time_str
+                    )),
+                ])])
+            })
+            .collect()
+    };
 
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Downloads"))
@@ -350,30 +349,6 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         );
-
-    // Calculate the [A/B] string
-    let selection_index = app.list_state.selected().map(|i| i + 1).unwrap_or(0);
-    let total_items = app.downloads.len();
-    let position_string = format!("[{}/{}]", selection_index, total_items);
-
-    // Create a span for the position string
-    let position_span = Span::styled(
-        position_string,
-        Style::default().fg(Color::Gray),
-    );
-
-    // Add the span to the title
-    let title = Spans::from(vec![
-        Span::raw("Downloads "),
-        position_span,
-    ]);
-
-    // Update the list block with the new title
-    let list = list.block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-    );
 
     f.render_stateful_widget(list, chunks[0], &mut app.list_state);
 
