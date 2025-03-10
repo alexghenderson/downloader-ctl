@@ -351,6 +351,30 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         );
 
+    // Calculate the [A/B] string
+    let selection_index = app.list_state.selected().map(|i| i + 1).unwrap_or(0);
+    let total_items = app.downloads.len();
+    let position_string = format!("[{}/{}]", selection_index, total_items);
+
+    // Create a span for the position string
+    let position_span = Span::styled(
+        position_string,
+        Style::default().fg(Color::Gray),
+    );
+
+    // Add the span to the title
+    let title = Spans::from(vec![
+        Span::raw("Downloads "),
+        position_span,
+    ]);
+
+    // Update the list block with the new title
+    let list = list.block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+    );
+
     f.render_stateful_widget(list, chunks[0], &mut app.list_state);
 
     let shortcuts = Paragraph::new(Text::from(Spans::from(vec![
