@@ -2,7 +2,7 @@ use std::{
     env,
     error::Error,
     io,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -14,7 +14,6 @@ use crossterm::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
@@ -178,7 +177,7 @@ impl App {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let downloader_url = match env::args().nth(1) {
         Some(url) => url,
@@ -201,14 +200,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             interval.tick().await;
             let app_clone = app_background.clone();
-            let mut app = match app_clone.lock().await {
-                Ok(guard) => guard,
-                Err(e) => {
-                    eprintln!("Failed to lock app: {}", e);
-                    continue;
-                }
-            };
-            if let Err(e) = app.fetch_downloads().await {
+            let mut app = app_clone.lock();
+            if let Err(e) = app.unwrap().fetch_downloads().await {
                 eprintln!("Error fetching downloads: {}", e);
             }
         }
@@ -241,126 +234,88 @@ async fn run_app<B: Backend>(
 
         if let Event::Key(key) = event::read()? {
             let app_clone = app.clone();
-            let input_mode = {
-                let app = app_clone.lock().await;
-                match app {
-                    Ok(ref app) => app.input_mode.clone(),
-                    Err(e) => {
-                        eprintln!("Failed to lock app: {}", e);
-                        InputMode::Normal
-                    }
-                }
-            };
-
-            match input_mode {
+            match {
+                let mut app = app_clone.lock().unwrap();
+                app.input_mode.clone()
+            } {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('a') => {
-                        let mut app = app_clone.lock().await?;
+                        let mut app = app_clone.lock().unwrap();
                         app.input_mode = InputMode::AddingDownload;
                     }
                     KeyCode::Char('s') => {
                         if let Some(model_name) = {
-                            let app = app_clone.lock().await?;
+                            let app = app_clone.lock().unwrap();
                             app.selected_model_name()
                         } {
                             let app_clone_inner = app_clone.clone();
                             tokio::spawn(async move {
-                                let result = app_clone_inner.lock().await;
-                                match result {
-                                    Ok(app) => {
-                                        if let Err(e) = app.stop_download(&model_name).await {
-                                            eprintln!("Error stopping download: {}", e);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        eprintln!("Failed to lock app: {}", err);
-                                    }
+                                if let Err(e) = {
+                                    let app = app_clone_inner.lock().unwrap();
+                                    app.stop_download(&model_name).await
+                                } {
+                                    eprintln!("Error stopping download: {}", e);
                                 }
-                                let result = app_clone_inner.lock().await;
-                                match result {
-                                    Ok(mut app) => {
-                                        if let Err(e) = app.fetch_downloads().await {
-                                            eprintln!("Error fetching downloads after stopping: {}", e);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        eprintln!("Failed to lock app: {}", err);
-                                    }
+                                if let Err(e) = {
+                                    let app = app_clone_inner.lock().unwrap();
+                                    app.fetch_downloads().await
+                                } {
+                                    eprintln!("Error fetching downloads after stopping: {}", e);
                                 }
                             });
                         }
                     }
                     KeyCode::Char('r') => {
                         if let Some(model_name) = {
-                            let app = app_clone.lock().await?;
+                            let app = app_clone.lock().unwrap();
                             app.selected_model_name()
                         } {
                             let app_clone_inner = app_clone.clone();
                             tokio::spawn(async move {
-                                let result = app_clone_inner.lock().await;
-                                match result {
-                                    Ok(app) => {
-                                        if let Err(e) = app.restart_download(&model_name).await {
-                                            eprintln!("Error restarting download: {}", e);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        eprintln!("Failed to lock app: {}", err);
-                                    }
+                                if let Err(e) = {
+                                    let app = app_clone_inner.lock().unwrap();
+                                    app.restart_download(&model_name).await
+                                } {
+                                    eprintln!("Error restarting download: {}", e);
                                 }
-                                let result = app_clone_inner.lock().await;
-                                match result {
-                                    Ok(mut app) => {
-                                        if let Err(e) = app.fetch_downloads().await {
-                                            eprintln!("Error fetching downloads after restarting: {}", e);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        eprintln!("Failed to lock app: {}", err);
-                                    }
+                                if let Err(e) = {
+                                    let app = app_clone_inner.lock().unwrap();
+                                    app.fetch_downloads().await
+                                } {
+                                    eprintln!("Error fetching downloads after restarting: {}", e);
                                 }
                             });
                         }
                     }
                     KeyCode::Char('p') => {
                         if let Some(model_name) = {
-                            let app = app_clone.lock().await?;
+                            let app = app_clone.lock().unwrap();
                             app.selected_model_name()
                         } {
                             let app_clone_inner = app_clone.clone();
                             tokio::spawn(async move {
-                                let result = app_clone_inner.lock().await;
-                                match result {
-                                    Ok(app) => {
-                                        if let Err(e) = app.pause_download(&model_name).await {
-                                            eprintln!("Error pausing download: {}", e);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        eprintln!("Failed to lock app: {}", err);
-                                    }
+                                if let Err(e) = {
+                                    let app = app_clone_inner.lock().unwrap();
+                                    app.pause_download(&model_name).await
+                                } {
+                                    eprintln!("Error pausing download: {}", e);
                                 }
-                                let result = app_clone_inner.lock().await;
-                                match result {
-                                    Ok(mut app) => {
-                                        if let Err(e) = app.fetch_downloads().await {
-                                            eprintln!("Error fetching downloads after pausing: {}", e);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        eprintln!("Failed to lock app: {}", err);
-                                    }
+                                if let Err(e) = {
+                                    let app = app_clone_inner.lock().unwrap();
+                                    app.fetch_downloads().await
+                                } {
+                                    eprintln!("Error fetching downloads after pausing: {}", e);
                                 }
                             });
                         }
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        let mut app = app_clone.lock().await?;
+                        let mut app = app_clone.lock().unwrap();
                         app.select_next();
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        let mut app = app_clone.lock().await?;
+                        let mut app = app_clone.lock().unwrap();
                         app.select_previous();
                     }
                     _ => {}
@@ -368,47 +323,37 @@ async fn run_app<B: Backend>(
                 InputMode::AddingDownload => match key.code {
                     KeyCode::Enter => {
                         let url = {
-                            let mut app = app_clone.lock().await?;
+                            let mut app = app_clone.lock().unwrap();
                             app.input_buffer.drain(..).collect()
                         };
                         let app_clone_inner = app_clone.clone();
                         tokio::spawn(async move {
-                            let result = app_clone_inner.lock().await;
-                            match result {
-                                Ok(mut app) => {
-                                    if let Err(e) = app.add_download(url).await {
-                                        eprintln!("Error adding download: {}", e);
-                                    }
-                                }
-                                Err(err) => {
-                                    eprintln!("Failed to lock app: {}", err);
-                                }
+                            if let Err(e) = {
+                                let app = app_clone_inner.lock().unwrap();
+                                app.add_download(url).await
+                            } {
+                                eprintln!("Error adding download: {}", e);
                             }
-                            let result = app_clone_inner.lock().await;
-                            match result {
-                                Ok(mut app) => {
-                                    if let Err(e) = app.fetch_downloads().await {
-                                        eprintln!("Error fetching downloads after adding: {}", e);
-                                    }
-                                }
-                                Err(err) => {
-                                    eprintln!("Failed to lock app: {}", err);
-                                }
+                            if let Err(e) = {
+                                let app = app_clone_inner.lock().unwrap();
+                                app.fetch_downloads().await
+                            } {
+                                eprintln!("Error fetching downloads after adding: {}", e);
                             }
                         });
-                        let mut app = app_clone.lock().await?;
+                        let mut app = app_clone.lock().unwrap();
                         app.input_mode = InputMode::Normal;
                     }
                     KeyCode::Char(c) => {
-                        let mut app = app_clone.lock().await?;
+                        let mut app = app_clone.lock().unwrap();
                         app.input_buffer.push(c);
                     }
                     KeyCode::Backspace => {
-                        let mut app = app_clone.lock().await?;
+                        let mut app = app_clone.lock().unwrap();
                         app.input_buffer.pop();
                     }
                     KeyCode::Esc => {
-                        let mut app = app_clone.lock().await?;
+                        let mut app = app_clone.lock().unwrap();
                         app.input_mode = InputMode::Normal;
                         app.input_buffer.clear();
                     }
@@ -420,13 +365,7 @@ async fn run_app<B: Backend>(
 }
 
 fn ui<B: Backend>(f: &mut Frame<B>, app_mutex: Arc<Mutex<App>>) {
-    let app = match tokio::runtime::Handle::current().block_on(app_mutex.lock()) {
-        Ok(app) => app,
-        Err(e) => {
-            eprintln!("Failed to lock app for UI: {}", e);
-            return;
-        }
-    };
+    let app = app_mutex.lock().unwrap();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
