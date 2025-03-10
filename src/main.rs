@@ -20,7 +20,7 @@ use tui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Span, Spans, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, StatefulWidget, ListState},
     Frame, Terminal,
 };
 
@@ -75,6 +75,7 @@ struct App {
     input_buffer: String,
     client: Client,
     last_refresh: Instant,
+    scroll_offset: usize,
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -93,6 +94,7 @@ impl App {
             input_buffer: String::new(),
             client: Client::new(),
             last_refresh: Instant::now(),
+            scroll_offset: 0,
         }
     }
 
@@ -142,9 +144,20 @@ impl App {
             self.selected_download = None;
             return;
         }
-        self.selected_download = Some(self.selected_download.map_or(0, |i| {
+
+        let new_selection = Some(self.selected_download.map_or(0, |i| {
             (i + 1).min(self.downloads.len() - 1)
         }));
+
+        self.selected_download = new_selection;
+
+        // Adjust scroll offset to keep selected item visible
+        if let Some(selected) = self.selected_download {
+            let visible_height = 10; // Assuming a visible height of 10 items
+            if selected >= self.scroll_offset + visible_height - 2 {
+                self.scroll_offset = (selected as i32 - visible_height as i32 + 2).max(0) as usize;
+            }
+        }
     }
 
     fn select_previous(&mut self) {
@@ -152,7 +165,16 @@ impl App {
             self.selected_download = None;
             return;
         }
-        self.selected_download = Some(self.selected_download.map_or(0, |i| i.saturating_sub(1)));
+
+        let new_selection = Some(self.selected_download.map_or(0, |i| i.saturating_sub(1)));
+        self.selected_download = new_selection;
+
+        // Adjust scroll offset to keep selected item visible
+        if let Some(selected) = self.selected_download {
+            if selected < self.scroll_offset + 1 && self.scroll_offset > 0 {
+                self.scroll_offset = selected.saturating_sub(1);
+            }
+        }
     }
 
     fn selected_model_name(&self) -> Option<&str> {
@@ -282,8 +304,14 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         .constraints([Constraint::Min(0), Constraint::Length(3)].as_ref())
         .split(f.size());
 
-    let items: Vec<ListItem> = app
-        .downloads
+    let visible_downloads: Vec<Download> = app.downloads
+        .iter()
+        .skip(app.scroll_offset)
+        .take(10) // Number of items visible in the list
+        .cloned()
+        .collect();
+
+    let items: Vec<ListItem> = visible_downloads
         .iter()
         .map(|download| {
             let time_since_last_change = Utc::now() - download.lastStatusChange;
